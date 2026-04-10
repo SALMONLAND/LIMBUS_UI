@@ -18,8 +18,10 @@ public class NoMoreUIPlugin : BasePlugin
     public override void Load()
     {
         AddComponent<NoMoreUIBehaviour>();
-        new Harmony("com.samhuelt.nomoreui").PatchAll(typeof(SkillInfoPatches));
-        new Harmony("com.samhuelt.nomoreui").PatchAll(typeof(DamageTypoPatches));
+        var harmony = new Harmony("com.samhuelt.nomoreui");
+        harmony.PatchAll(typeof(SkillInfoPatches));
+        harmony.PatchAll(typeof(DamageTypoPatches));
+        harmony.PatchAll(typeof(ParryingTypoPatches));
     }
 }
 
@@ -27,7 +29,11 @@ public class NoMoreUIBehaviour : MonoBehaviour
 {
     void Update()
     {
-        if (!Input.GetKeyDown(KeyCode.Keypad5))
+        // ★ Hidden 상태일 때 매 프레임 ParryingTypoUI 감시 → 생성 즉시 제거
+        if (NoMoreUIPlugin.Hidden)
+            KillAllParryingTypo();
+
+        if (!Input.GetKeyDown(KeyCode.Keypad5) && !Input.GetKeyDown(KeyCode.U))
             return;
 
         var uiRoot = SingletonBehavior<BattleUIRoot>.Instance;
@@ -37,6 +43,19 @@ public class NoMoreUIBehaviour : MonoBehaviour
         NoMoreUIPlugin.Hidden = !NoMoreUIPlugin.Hidden;
         SetRootUI(uiRoot, !NoMoreUIPlugin.Hidden);
         SetUnitUI(!NoMoreUIPlugin.Hidden);
+        SetParryingTypoUI(!NoMoreUIPlugin.Hidden);
+    }
+
+    // ★ 매 프레임 호출 — 새로 생성된 ParryingTypoUI를 즉시 비활성화
+    private void KillAllParryingTypo()
+    {
+        var all = Object.FindObjectsOfType<ParryingTypoUI>();
+        if (all == null) return;
+        for (int i = 0; i < all.Length; i++)
+        {
+            if (all[i] != null && all[i].gameObject.activeSelf)
+                all[i].gameObject.SetActive(false);
+        }
     }
 
     private void SetRootUI(BattleUIRoot root, bool active)
@@ -51,10 +70,30 @@ public class NoMoreUIBehaviour : MonoBehaviour
         if (perspectiveCanvas != null)
             ((Component)perspectiveCanvas).gameObject.SetActive(active);
 
-        // 전면 UI (라운드 타이포, 페이드 등)
+        // ★ 전면 UI (라운드 타이포, 페이드, 웨이브 전환 등)
+        // SetActive(false)로 끄면 웨이브 전환 로직이 멈추므로,
+        // CanvasGroup.alpha = 0 으로 "보이지만 않게" 처리 → 클릭하면 다음 웨이브로 넘어감
         var frontUI = root._frontUIController;
         if (frontUI != null)
-            ((Component)frontUI).gameObject.SetActive(active);
+        {
+            GameObject frontGO = ((Component)frontUI).gameObject;
+            CanvasGroup cg = frontGO.GetComponent<CanvasGroup>();
+            if (cg == null)
+                cg = frontGO.AddComponent<CanvasGroup>();
+
+            if (!active) // UI 숨기기
+            {
+                cg.alpha = 0f;
+                cg.blocksRaycasts = true;  // 클릭은 통과시켜서 웨이브 전환 가능
+                cg.interactable = true;
+            }
+            else // UI 보이기
+            {
+                cg.alpha = 1f;
+                cg.blocksRaycasts = true;
+                cg.interactable = true;
+            }
+        }
 
         // 오브젝트 UI
         var objectUI = root._objectUIController;
@@ -139,6 +178,19 @@ public class NoMoreUIBehaviour : MonoBehaviour
             }
         }
     }
+
+    // ★ 씬에 존재하는 모든 ParryingTypoUI 오브젝트를 찾아서 끄기/켜기
+    private void SetParryingTypoUI(bool visible)
+    {
+        var allParryingTypos = Object.FindObjectsOfType<ParryingTypoUI>();
+        if (allParryingTypos == null) return;
+
+        for (int i = 0; i < allParryingTypos.Length; i++)
+        {
+            if (allParryingTypos[i] != null)
+                allParryingTypos[i].gameObject.SetActive(visible);
+        }
+    }
 }
 
 [HarmonyPatch]
@@ -187,4 +239,14 @@ internal static class DamageTypoPatches
     [HarmonyPatch(typeof(BattleUnitUIManager), nameof(BattleUnitUIManager.CreateDamageTypoText))]
     [HarmonyPrefix]
     static bool BlockDamageTypoText() => !NoMoreUIPlugin.Hidden;
+}
+
+// ★ 패링(합) 타이포 전용 패치 — ParryingTypoUI 클래스 직접 차단
+[HarmonyPatch]
+internal static class ParryingTypoPatches
+{
+    // SetParryingTypoData 호출 차단 → 합 UI 데이터 세팅 자체를 막음
+    [HarmonyPatch(typeof(ParryingTypoUI), nameof(ParryingTypoUI.SetParryingTypoData))]
+    [HarmonyPrefix]
+    static bool BlockSetParryingTypoData() => !NoMoreUIPlugin.Hidden;
 }
