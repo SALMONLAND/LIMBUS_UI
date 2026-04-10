@@ -29,10 +29,6 @@ public class NoMoreUIBehaviour : MonoBehaviour
 {
     void Update()
     {
-        // ★ Hidden 상태일 때 매 프레임 ParryingTypoUI 감시 → 생성 즉시 제거
-        if (NoMoreUIPlugin.Hidden)
-            KillAllParryingTypo();
-
         if (!Input.GetKeyDown(KeyCode.Keypad5) && !Input.GetKeyDown(KeyCode.U))
             return;
 
@@ -46,16 +42,31 @@ public class NoMoreUIBehaviour : MonoBehaviour
         SetParryingTypoUI(!NoMoreUIPlugin.Hidden);
     }
 
-    // ★ 매 프레임 호출 — 새로 생성된 ParryingTypoUI를 즉시 비활성화
-    private void KillAllParryingTypo()
+    // ★ 매 프레임 후반에 잔존하는 패링 UI를 모두 강제 제거 (안전망)
+    void LateUpdate()
     {
-        var all = Object.FindObjectsOfType<ParryingTypoUI>();
-        if (all == null) return;
-        for (int i = 0; i < all.Length; i++)
-        {
-            if (all[i] != null && all[i].gameObject.activeSelf)
-                all[i].gameObject.SetActive(false);
-        }
+        if (!NoMoreUIPlugin.Hidden) return;
+
+        // ParryingTypoUI (합 텍스트 타이포)
+        var typos = Object.FindObjectsOfType<ParryingTypoUI>();
+        if (typos != null)
+            for (int i = 0; i < typos.Length; i++)
+                if (typos[i] != null && typos[i].gameObject.activeSelf)
+                    typos[i].gameObject.SetActive(false);
+
+        // ParryingDiceUI (합 코인/주사위 숫자)
+        var dices = Object.FindObjectsOfType<ParryingDiceUI>();
+        if (dices != null)
+            for (int i = 0; i < dices.Length; i++)
+                if (dices[i] != null && dices[i].gameObject.activeSelf)
+                    dices[i].gameObject.SetActive(false);
+
+        // ParryingDiceAnimationController (합 코인 굴림 연출)
+        var anims = Object.FindObjectsOfType<ParryingDiceAnimationController>();
+        if (anims != null)
+            for (int i = 0; i < anims.Length; i++)
+                if (anims[i] != null && anims[i].gameObject.activeSelf)
+                    anims[i].gameObject.SetActive(false);
     }
 
     private void SetRootUI(BattleUIRoot root, bool active)
@@ -241,11 +252,16 @@ internal static class DamageTypoPatches
     static bool BlockDamageTypoText() => !NoMoreUIPlugin.Hidden;
 }
 
-// ★ 패링(합) 타이포 전용 패치 — ParryingTypoUI 클래스 직접 차단
+// ★ 패링(합) 타이포 원천 차단 — 생성 자체를 막음
 [HarmonyPatch]
 internal static class ParryingTypoPatches
 {
-    // SetParryingTypoData 호출 차단 → 합 UI 데이터 세팅 자체를 막음
+    // BattleUnitUIManager.CreateParryingTypo 는 Protected라 nameof() 불가 → 문자열로 지정
+    [HarmonyPatch(typeof(BattleUnitUIManager), "CreateParryingTypo")]
+    [HarmonyPrefix]
+    static bool BlockCreateParryingTypo() => !NoMoreUIPlugin.Hidden;
+
+    // 데이터 세팅도 이중으로 차단 (다른 경로로 호출될 경우 대비)
     [HarmonyPatch(typeof(ParryingTypoUI), nameof(ParryingTypoUI.SetParryingTypoData))]
     [HarmonyPrefix]
     static bool BlockSetParryingTypoData() => !NoMoreUIPlugin.Hidden;
