@@ -1,0 +1,125 @@
+using BattleUI;
+using BepInEx;
+using BepInEx.Logging;
+using BepInEx.Unity.IL2CPP;
+using HarmonyLib;
+using UnityEngine;
+
+namespace BattleSpeed;
+
+[BepInPlugin("com.samhuelt.battlespeed", "BattleSpeed", "2.7.0")]
+public class BattleSpeedPlugin : BasePlugin
+{
+    internal static ManualLogSource Logger = null!;
+    internal static int ClashCount = 0;
+    internal static int CoinCount = 0;
+    internal static bool IsClashingState = false;
+
+    public override void Load()
+    {
+        Logger = Log;
+        AddComponent<BattleSpeedBehaviour>();
+
+        var harmony = new Harmony("com.samhuelt.battlespeed");
+
+        // 1. 합(Clash) 시작 및 단계별 가속
+        var bsvsType = AccessTools.TypeByName("BattleSkillViewSkin");
+        if (bsvsType != null)
+        {
+            var parryEvent = AccessTools.Method(bsvsType, "OnParryingEvent");
+            if (parryEvent != null)
+            {
+                harmony.Patch(parryEvent, prefix: new HarmonyMethod(typeof(BattleSpeedPlugin), nameof(SetClashTrue)));
+                harmony.Patch(parryEvent, postfix: new HarmonyMethod(typeof(BattleSpeedPlugin), nameof(OnClashStep)));
+            }
+        }
+
+        // 2. 코인 던지기 (일방 공격 시작)
+        var bdvType = AccessTools.TypeByName("BattleDuelViewer");
+        if (bdvType != null)
+        {
+            var startCoin = AccessTools.Method(bdvType, "StartCoinToss", new[] { typeof(int) });
+            if (startCoin != null) 
+                harmony.Patch(startCoin, prefix: new HarmonyMethod(typeof(BattleSpeedPlugin), nameof(OnCoinStart)));
+        }
+
+        // 3. 모든 리셋 포인트 통합 (카메라 복귀, 라운드 종료 등)
+        var resetPoints = new[] {
+            AccessTools.Method("BattleDuelViewer:SetAfterCointossCamera"),
+            AccessTools.Method(typeof(ActRoundEndEffectUI), "OnEnable")
+        };
+
+        foreach (var method in resetPoints)
+        {
+            if (method != null)
+                harmony.Patch(method, postfix: new HarmonyMethod(typeof(BattleSpeedPlugin), nameof(OnResetAll)));
+        }
+
+        Logger.LogInfo("BattleSpeed 2.7: Logic-based Auto Reset Applied!");
+    }
+
+    static void SetClashTrue() => IsClashingState = true;
+    static void OnClashStep() { ClashCount++; CoinCount = 0; }
+    static void OnCoinStart() { if (!IsClashingState) CoinCount++; }
+
+    static void OnResetAll()
+    {
+        ClashCount = 0;
+        CoinCount = 0;
+        IsClashingState = false;
+        Time.timeScale = 1f;
+    }
+}
+
+public class BattleSpeedBehaviour : MonoBehaviour
+{
+    private float _checkTimer = 0f;
+
+    void Update()
+    {
+        // 핵심 로직: 일방 공격 중일 때, 현재 공격 중인 유닛이 없으면 속도를 1로 강제 복구
+        if (!BattleSpeedPlugin.IsClashingState && BattleSpeedPlugin.CoinCount > 0)
+        {
+            _checkTimer += Time.unscaledDeltaTime;
+            
+            // 너무 자주 체크하면 무거우므로 0.1초마다 유닛 상태 확인
+            if (_checkTimer >= 0.1f)
+            {
+                _checkTimer = 0f;
+                if (!IsAnyUnitAttacking())
+                {
+                    ForceReset();
+                    return;
+                }
+            }
+        }
+
+        // 속도 적용 부분
+        if (BattleSpeedPlugin.IsClashingState)
+        {
+            Time.timeScale = Mathf.Min(1f + (BattleSpeedPlugin.ClashCount * 0.3f), 3.5f);
+        }
+        else if (BattleSpeedPlugin.CoinCount > 0)
+        {
+            Time.timeScale = Mathf.Min(1f + (BattleSpeedPlugin.CoinCount * 0.3f), 3.0f);
+        }
+    }
+
+    // 현재 씬에서 공격 애니메이션을 재생 중인 유닛이 있는지 확인
+    private bool IsAnyUnitAttacking()
+    {
+        var duelViewer = Object.FindObjectOfType<BattleDuelViewer>();
+        if (duelViewer == null) return false;
+
+        // DuelViewer가 활성화 상태가 아니면 공격이 끝난 것으로 판단
+        return duelViewer.gameObject.activeInHierarchy;
+    }
+
+    private void ForceReset()
+    {
+        BattleSpeedPlugin.ClashCount = 0;
+        BattleSpeedPlugin.CoinCount = 0;
+        BattleSpeedPlugin.IsClashingState = false;
+        Time.timeScale = 1f;
+    }
+}
