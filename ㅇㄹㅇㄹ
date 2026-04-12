@@ -1,0 +1,123 @@
+using BattleUI;
+using BepInEx;
+using BepInEx.Logging;
+using BepInEx.Unity.IL2CPP;
+using HarmonyLib;
+using UnityEngine;
+
+namespace BattleSpeed;
+
+[BepInPlugin("com.samhuelt.battlespeed", "BattleSpeed", "2.4.0")]
+public class BattleSpeedPlugin : BasePlugin
+{
+    internal static ManualLogSource Logger = null!;
+    internal static int ClashCount = 0;
+    internal static int CoinCount = 0;
+    internal static bool IsClashingState = false;
+
+    public override void Load()
+    {
+        Logger = Log;
+        AddComponent<BattleSpeedBehaviour>();
+
+        var harmony = new Harmony("com.samhuelt.battlespeed");
+
+        // 1. 합 이벤트 패치
+        var bsvsType = AccessTools.TypeByName("BattleSkillViewSkin");
+        if (bsvsType != null)
+        {
+            var parryEvent = AccessTools.Method(bsvsType, "OnParryingEvent");
+            if (parryEvent != null)
+                harmony.Patch(parryEvent, postfix: new HarmonyMethod(typeof(BattleSpeedPlugin), nameof(OnClashStep)));
+        }
+
+        // 2. 코인 던지기 패치
+        var bdvType = AccessTools.TypeByName("BattleDuelViewer");
+        if (bdvType != null)
+        {
+            var startCoin = AccessTools.Method(bdvType, "StartCoinToss", new[] { typeof(int) });
+            var afterCamera = AccessTools.Method(bdvType, "SetAfterCointossCamera");
+
+            if (startCoin != null) 
+                harmony.Patch(startCoin, prefix: new HarmonyMethod(typeof(BattleSpeedPlugin), nameof(OnCoinStart)));
+            
+            if (afterCamera != null) 
+                harmony.Patch(afterCamera, postfix: new HarmonyMethod(typeof(BattleSpeedPlugin), nameof(OnResetAll)));
+        }
+
+        // 3. 라운드 종료 패치
+        var roundEnd = AccessTools.Method(typeof(ActRoundEndEffectUI), "OnEnable");
+        if (roundEnd != null)
+            harmony.Patch(roundEnd, postfix: new HarmonyMethod(typeof(BattleSpeedPlugin), nameof(OnResetAll)));
+
+        Logger.LogInfo("BattleSpeed 2.4: Counter conflict fixed!");
+    }
+
+    static void OnClashStep()
+    {
+        ClashCount++;
+        CoinCount = 0; // 합이 진행 중이면 코인 카운트를 강제로 0으로 유지
+    }
+
+    static void OnCoinStart()
+    {
+        // 중요: 합 UI가 떠 있는 상태(IsClashingState)라면 코인 카운트를 올리지 않음
+        if (IsClashingState) 
+        {
+            CoinCount = 0;
+            return;
+        }
+        CoinCount++;
+    }
+
+    // 모든 카운터를 한 번에 깨끗하게 미는 통합 리셋 함수
+    static void OnResetAll()
+    {
+        ClashCount = 0;
+        CoinCount = 0;
+        if (!IsClashingState) 
+        {
+            Time.timeScale = 1f;
+        }
+    }
+}
+
+public class BattleSpeedBehaviour : MonoBehaviour
+{
+    private bool _wasClashUIActive = false;
+
+    void Update()
+    {
+        // UI 감시
+        var typos = Object.FindObjectsOfType<ParryingTypoUI>(true);
+        bool isClashUIActive = typos != null && typos.Length > 0;
+
+        // 현재 합 상태 전역 공유
+        BattleSpeedPlugin.IsClashingState = isClashUIActive;
+
+        if (isClashUIActive)
+        {
+            _wasClashUIActive = true;
+            // 합 중에는 ClashCount만 사용
+            float targetSpeed = 1f + (BattleSpeedPlugin.ClashCount * 0.3f);
+            Time.timeScale = targetSpeed;
+        }
+        else
+        {
+            if (_wasClashUIActive)
+            {
+                // [합 종료 직후] 모든 카운터를 즉시 초기화하여 '2.4배속 점프' 방지
+                _wasClashUIActive = false;
+                BattleSpeedPlugin.ClashCount = 0;
+                BattleSpeedPlugin.CoinCount = 0; 
+                Time.timeScale = 1f;
+                BattleSpeedPlugin.Logger.LogInfo("[CLASH -> RESET] Cleaned all counters");
+            }
+            else if (BattleSpeedPlugin.CoinCount > 0)
+            {
+                // 일방 공격 시에만 코인 카운트 사용
+                Time.timeScale = 1f + (BattleSpeedPlugin.CoinCount * 0.3f);
+            }
+        }
+    }
+}
